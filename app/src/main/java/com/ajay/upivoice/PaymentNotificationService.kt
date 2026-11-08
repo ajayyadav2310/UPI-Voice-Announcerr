@@ -1,10 +1,10 @@
-
 package com.ajay.upivoice
 
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.speech.tts.TextToSpeech
 import android.os.Bundle
+import android.content.Context
 import java.util.Locale
 import java.security.MessageDigest
 
@@ -12,31 +12,51 @@ class PaymentNotificationService : NotificationListenerService() {
 
     private var tts: TextToSpeech? = null
     private var ready = false
-    private lateinit var database: TransactionDb
 
-    private val recentNotifications = mutableMapOf<String, Long>()
-    private val pendingAnnouncements = mutableListOf<String>()
+    private val prefs by lazy {
+        getSharedPreferences("upi_settings", Context.MODE_PRIVATE)
+    }
+
+    private val recent = mutableMapOf<String, Long>()
+    private val pending = mutableListOf<String>()
 
     override fun onCreate() {
         super.onCreate()
-
-        database = TransactionDb(this)
 
         tts = TextToSpeech(this) { status ->
             ready = status == TextToSpeech.SUCCESS
 
             if (ready) {
-                tts?.language = Locale("hi", "IN")
+                configureVoice()
 
-                synchronized(pendingAnnouncements) {
-                    pendingAnnouncements.forEach { speak(it) }
-                    pendingAnnouncements.clear()
+                synchronized(pending) {
+                    pending.forEach { speak(it) }
+                    pending.clear()
                 }
             }
         }
     }
 
+    private fun configureVoice() {
+        val language = prefs.getString("language", "both") ?: "both"
+
+        val locale = when (language) {
+            "hi" -> Locale("hi", "IN")
+            "en" -> Locale.US
+            else -> Locale("en", "IN")
+        }
+
+        tts?.language = locale
+        tts?.setSpeechRate(
+            prefs.getInt("voice_speed", 10) / 10f
+        )
+        tts?.setPitch(
+            prefs.getInt("voice_pitch", 10) / 10f
+        )
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+
         val extras: Bundle = sbn.notification.extras
 
         val title = extras.getCharSequence("android.title")
@@ -58,7 +78,7 @@ class PaymentNotificationService : NotificationListenerService() {
 
         val sentWords = listOf(
             "sent", "paid", "debited", "transferred",
-            "you paid", "भेजा", "भुगतान किया", "डेबिट"
+            "भेजा", "भुगतान किया", "डेबिट"
         )
 
         val direction = when {
@@ -67,12 +87,24 @@ class PaymentNotificationService : NotificationListenerService() {
             else -> return
         }
 
-        val amountRegex = Regex(
+        if (direction == "RECEIVED" &&
+            !prefs.getBoolean("received_enabled", true)
+        ) return
+
+        if (direction == "SENT" &&
+            !prefs.getBoolean("sent_enabled", true)
+        ) return
+
+        if (!prefs.getBoolean("voice_enabled", true)) return
+
+        if (prefs.getBoolean("silent_mode", false)) return
+
+        val regex = Regex(
             """(?:₹|rs\.?|inr)\s*([0-9,]+(?:\.[0-9]{1,2})?)|([0-9,]+(?:\.[0-9]{1,2})?)\s*(?:rs\.?|inr|rupees|रुपये)""",
             RegexOption.IGNORE_CASE
         )
 
-        val match = amountRegex.find(message) ?: return
+        val match = regex.find(message) ?: return
 
         val amountString = match.groupValues
             .drop(1)
@@ -85,20 +117,15 @@ class PaymentNotificationService : NotificationListenerService() {
         val now = System.currentTimeMillis()
         val rawKey = "${sbn.packageName}|${sbn.key}|${sbn.postTime}|$amount|$direction"
 
-        val dedupeKey = MessageDigest.getInstance("SHA-256")
+        val key = MessageDigest.getInstance("SHA-256")
             .digest(rawKey.toByteArray())
             .joinToString("") { "%02x".format(it) }
 
-        synchronized(recentNotifications) {
-            if (now - (recentNotifications[dedupeKey] ?: 0L) < 10000L) {
-                return
-            }
+        synchronized(recent) {
+            if (now - (recent[key] ?: 0L) < 10000L) return
 
-            recentNotifications[dedupeKey] = now
-
-            recentNotifications.entries.removeAll {
-                now - it.value > 60000L
-            }
+            recent[key] = now
+            recent.entries.removeAll { now - it.value > 60000L }
         }
 
         val appName = try {
@@ -109,8 +136,8 @@ class PaymentNotificationService : NotificationListenerService() {
             "UPI"
         }
 
-        val saved = database.saveTransaction(
-            dedupeKey = dedupeKey,
+        val saved = TransactionDb(this).saveTransaction(
+            dedupeKey = key,
             amount = amount,
             direction = direction,
             counterparty = "",
@@ -122,17 +149,28 @@ class PaymentNotificationService : NotificationListenerService() {
 
         if (!saved) return
 
-        val announcement = if (direction == "RECEIVED") {
-            "$amountString रुपये $appName पर प्राप्त हुए"
-        } else {
-            "$amountString रुपये $appName से भेजे गए"
+        val language = prefs.getString("language", "both")
+
+        val announcement = when (language) {
+            "hi" -> if (direction == "RECEIVED")
+                "$amountString रुपये प्राप्त हुए"
+            else "$amountString रुपये भेजे गए"
+
+            "en" -> if (direction == "RECEIVED")
+                "Rupees $amountString received on $appName"
+            else "Rupees $amountString sent using $appName"
+
+            else -> if (direction == "RECEIVED")
+                "$amountString रुपये $appName पर प्राप्त हुए"
+            else "$amountString रुपये $appName से भेजे गए"
         }
 
-        synchronized(pendingAnnouncements) {
+        synchronized(pending) {
             if (ready) {
+                configureVoice()
                 speak(announcement)
             } else {
-                pendingAnnouncements.add(announcement)
+                pending.add(announcement)
             }
         }
     }
