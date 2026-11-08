@@ -1,3 +1,4 @@
+
 package com.ajay.upivoice
 
 import android.service.notification.NotificationListenerService
@@ -5,27 +6,37 @@ import android.service.notification.StatusBarNotification
 import android.speech.tts.TextToSpeech
 import android.os.Bundle
 import java.util.Locale
+import java.security.MessageDigest
 
 class PaymentNotificationService : NotificationListenerService() {
 
     private var tts: TextToSpeech? = null
     private var ready = false
+    private lateinit var database: TransactionDb
+
     private val recentNotifications = mutableMapOf<String, Long>()
+    private val pendingAnnouncements = mutableListOf<String>()
 
     override fun onCreate() {
         super.onCreate()
 
+        database = TransactionDb(this)
+
         tts = TextToSpeech(this) { status ->
             ready = status == TextToSpeech.SUCCESS
+
             if (ready) {
                 tts?.language = Locale("hi", "IN")
+
+                synchronized(pendingAnnouncements) {
+                    pendingAnnouncements.forEach { speak(it) }
+                    pendingAnnouncements.clear()
+                }
             }
         }
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        if (!ready) return
-
         val extras: Bundle = sbn.notification.extras
 
         val title = extras.getCharSequence("android.title")
@@ -41,17 +52,20 @@ class PaymentNotificationService : NotificationListenerService() {
         val lower = message.lowercase(Locale.ROOT)
 
         val receivedWords = listOf(
-            "received", "credited", "got", "added",
+            "received", "credited", "got", "added", "credit",
             "प्राप्त", "मिला", "जमा", "आए"
         )
 
         val sentWords = listOf(
-            "sent", "paid", "debited", "payment successful",
-            "भेजा", "भुगतान किया"
+            "sent", "paid", "debited", "transferred",
+            "you paid", "भेजा", "भुगतान किया", "डेबिट"
         )
 
-        if (receivedWords.none { lower.contains(it) }) return
-        if (sentWords.any { lower.contains(it) }) return
+        val direction = when {
+            sentWords.any { lower.contains(it) } -> "SENT"
+            receivedWords.any { lower.contains(it) } -> "RECEIVED"
+            else -> return
+        }
 
         val amountRegex = Regex(
             """(?:₹|rs\.?|inr)\s*([0-9,]+(?:\.[0-9]{1,2})?)|([0-9,]+(?:\.[0-9]{1,2})?)\s*(?:rs\.?|inr|rupees|रुपये)""",
@@ -59,17 +73,29 @@ class PaymentNotificationService : NotificationListenerService() {
         )
 
         val match = amountRegex.find(message) ?: return
-        val amount = match.groupValues
+
+        val amountString = match.groupValues
             .drop(1)
             .firstOrNull { it.isNotBlank() }
             ?.replace(",", "") ?: return
 
+        val amount = amountString.toDoubleOrNull() ?: return
+        if (amount <= 0) return
+
         val now = System.currentTimeMillis()
-        val key = "${sbn.key}:$amount"
+        val rawKey = "${sbn.packageName}|${sbn.key}|${sbn.postTime}|$amount|$direction"
+
+        val dedupeKey = MessageDigest.getInstance("SHA-256")
+            .digest(rawKey.toByteArray())
+            .joinToString("") { "%02x".format(it) }
 
         synchronized(recentNotifications) {
-            if (now - (recentNotifications[key] ?: 0L) < 10000L) return
-            recentNotifications[key] = now
+            if (now - (recentNotifications[dedupeKey] ?: 0L) < 10000L) {
+                return
+            }
+
+            recentNotifications[dedupeKey] = now
+
             recentNotifications.entries.removeAll {
                 now - it.value > 60000L
             }
@@ -83,11 +109,40 @@ class PaymentNotificationService : NotificationListenerService() {
             "UPI"
         }
 
+        val saved = database.saveTransaction(
+            dedupeKey = dedupeKey,
+            amount = amount,
+            direction = direction,
+            counterparty = "",
+            appName = appName,
+            packageName = sbn.packageName,
+            title = title,
+            message = message
+        )
+
+        if (!saved) return
+
+        val announcement = if (direction == "RECEIVED") {
+            "$amountString रुपये $appName पर प्राप्त हुए"
+        } else {
+            "$amountString रुपये $appName से भेजे गए"
+        }
+
+        synchronized(pendingAnnouncements) {
+            if (ready) {
+                speak(announcement)
+            } else {
+                pendingAnnouncements.add(announcement)
+            }
+        }
+    }
+
+    private fun speak(message: String) {
         tts?.speak(
-            "$amount रुपये $appName पर प्राप्त हुए",
+            message,
             TextToSpeech.QUEUE_ADD,
             null,
-            key
+            System.currentTimeMillis().toString()
         )
     }
 
