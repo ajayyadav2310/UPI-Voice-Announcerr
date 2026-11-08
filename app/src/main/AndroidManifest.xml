@@ -1,31 +1,48 @@
+
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
         android:allowBackup="false"
-        android:label="UPI Voice Announcer"
+        android:label="UPI Manager"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:supportsRtl="true">
+
+        <activity
+            android:name=".BackupActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".AnalyticsActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".TransactionHistoryActivity"
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"
             android:exported="true">
 
             <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
         </activity>
 
         <service
             android:name=".PaymentNotificationService"
-            android:label="UPI Voice Announcer"
+            android:label="UPI Manager"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
             android:exported="true">
 
             <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService"/>
+                <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
 
         </service>
