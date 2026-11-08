@@ -1,20 +1,18 @@
+
 package com.ajay.upivoice
 
 import android.app.Activity
 import android.os.Bundle
+import android.content.Intent
 import android.graphics.Color
-import android.view.Gravity
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.widget.*
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
-class TransactionHistoryActivity : Activity() {
+class MainActivity : Activity() {
 
-    private lateinit var database: TransactionDb
-    private lateinit var list: LinearLayout
-    private lateinit var search: EditText
-    private var filter = "ALL"
+    private lateinit var db: TransactionDb
+    private lateinit var root: LinearLayout
 
     private val bg = Color.rgb(11, 16, 32)
     private val card = Color.rgb(24, 32, 53)
@@ -26,191 +24,257 @@ class TransactionHistoryActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        database = TransactionDb(this)
+        db = TransactionDb(this)
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(20), dp(18), dp(15))
+        val scroll = ScrollView(this).apply {
             setBackgroundColor(bg)
         }
 
-        val title = TextView(this).apply {
-            text = "Transaction History"
-            textSize = 24f
-            setTextColor(white)
-            setTypeface(null, android.graphics.Typeface.BOLD)
+        root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(25), dp(20), dp(30))
         }
 
-        root.addView(title)
+        scroll.addView(root)
+        setContentView(scroll)
 
-        search = EditText(this).apply {
-            hint = "Search app or transaction..."
-            setHintTextColor(muted)
-            setTextColor(white)
-            setSingleLine(true)
-            setPadding(dp(12), 0, dp(12), 0)
-            setBackgroundColor(card)
+        showDashboard()
+    }
+
+    private fun showDashboard() {
+        root.removeAllViews()
+
+        addText("UPI MANAGER", 27f, white, true)
+        addText("Your offline payment assistant", 13f, muted)
+        space(24)
+
+        addText("PAYMENT OVERVIEW", 14f, muted, true)
+        space(10)
+
+        val totals = getTotals()
+
+        addCard("TOTAL RECEIVED", "₹${money(totals.first)}", green)
+        space(12)
+
+        addCard("TOTAL SENT", "₹${money(totals.second)}", red)
+        space(12)
+
+        addCard("TOTAL TRANSACTIONS", totals.third.toString(), white)
+
+        space(25)
+        addText("MANAGE YOUR PAYMENTS", 16f, white, true)
+        space(10)
+
+        addMenu(
+            "Transaction History",
+            "Search and view payments"
+        ) {
+            open(TransactionHistoryActivity::class.java)
         }
 
-        root.addView(search, LinearLayout.LayoutParams(-1, dp(50)))
-
-        val filters = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+        addMenu(
+            "Analytics & Reports",
+            "Daily, weekly and monthly statistics"
+        ) {
+            open(AnalyticsActivity::class.java)
         }
 
-        listOf("ALL", "RECEIVED", "SENT").forEach { value ->
-            val button = Button(this).apply {
-                text = value
-                textSize = 11f
-                setOnClickListener {
-                    filter = value
-                    loadTransactions()
-                }
-            }
-            filters.addView(
-                button,
-                LinearLayout.LayoutParams(0, dp(48), 1f)
+        addMenu(
+            "Voice Settings",
+            "Language, speed and announcements"
+        ) {
+            open(SettingsActivity::class.java)
+        }
+
+        addMenu(
+            "Local Backup",
+            "Backup and restore your data"
+        ) {
+            open(BackupActivity::class.java)
+        }
+
+        addMenu(
+            "Export Transactions",
+            "Export payment history as CSV"
+        ) {
+            open(ExportActivity::class.java)
+        }
+
+        space(15)
+
+        addMenu(
+            "Notification Access",
+            "Enable payment notification reading"
+        ) {
+            startActivity(
+                Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
             )
         }
 
-        root.addView(filters)
+        space(20)
 
-        val scroll = ScrollView(this)
-        list = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(12), 0, dp(20))
-        }
-
-        scroll.addView(list)
-        root.addView(
-            scroll,
-            LinearLayout.LayoutParams(-1, 0, 1f)
+        addText(
+            "OFFLINE STORAGE • NO CLOUD SYNC",
+            12f,
+            muted,
+            true
         )
 
-        setContentView(root)
+        space(6)
 
-        search.addTextChangedListener(
-            object : android.text.TextWatcher {
-                override fun beforeTextChanged(
-                    s: CharSequence?, start: Int, count: Int, after: Int
-                ) {}
-
-                override fun onTextChanged(
-                    s: CharSequence?, start: Int, before: Int, count: Int
-                ) {
-                    loadTransactions()
-                }
-
-                override fun afterTextChanged(s: android.text.Editable?) {}
-            }
+        addText(
+            "Payment records are based on notifications, not independent bank verification.",
+            12f,
+            muted
         )
-
-        loadTransactions()
     }
 
-    private fun loadTransactions() {
-        list.removeAllViews()
+    private fun getTotals(): Triple<Double, Double, Int> {
+        val cursor = db.readableDatabase.rawQuery(
+            """
+            SELECT
+            COALESCE(SUM(CASE WHEN direction='RECEIVED' THEN amount ELSE 0 END),0),
+            COALESCE(SUM(CASE WHEN direction='SENT' THEN amount ELSE 0 END),0),
+            COUNT(*)
+            FROM transactions
+            """.trimIndent(),
+            null
+        )
 
-        val cursor = database.getRecentTransactions(1000)
-        val query = search.text.toString().trim().lowercase(Locale.ROOT)
-        var found = 0
+        var received = 0.0
+        var sent = 0.0
+        var count = 0
 
         if (cursor.moveToFirst()) {
-            do {
-                val amount = cursor.getDouble(
-                    cursor.getColumnIndexOrThrow("amount")
-                )
-
-                val direction = cursor.getString(
-                    cursor.getColumnIndexOrThrow("direction")
-                )
-
-                val app = cursor.getString(
-                    cursor.getColumnIndexOrThrow("app_name")
-                ) ?: "UPI"
-
-                val name = cursor.getString(
-                    cursor.getColumnIndexOrThrow("counterparty")
-                ).orEmpty()
-
-                val message = cursor.getString(
-                    cursor.getColumnIndexOrThrow("notification_text")
-                ).orEmpty()
-
-                val time = cursor.getLong(
-                    cursor.getColumnIndexOrThrow("received_at")
-                )
-
-                if (filter != "ALL" && direction != filter) continue
-
-                val searchable = "$app $name $message $amount $direction"
-                    .lowercase(Locale.ROOT)
-
-                if (query.isNotEmpty() && !searchable.contains(query)) continue
-
-                found++
-
-                val received = direction == "RECEIVED"
-
-                val item = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(15), dp(15), dp(15), dp(15))
-                    setBackgroundColor(card)
-                }
-
-                val amountView = TextView(this).apply {
-                    text = (if (received) "+ ₹" else "- ₹") +
-                        String.format(Locale.US, "%,.2f", amount)
-                    textSize = 19f
-                    setTextColor(if (received) green else red)
-                    setTypeface(null, android.graphics.Typeface.BOLD)
-                }
-
-                val details = TextView(this).apply {
-                    text = buildString {
-                        append(if (received) "Received" else "Sent")
-                        append(" • $app")
-                        if (name.isNotBlank()) append("\n$name")
-                        append(
-                            "\n" + SimpleDateFormat(
-                                "dd MMM yyyy, hh:mm a",
-                                Locale.getDefault()
-                            ).format(Date(time))
-                        )
-                    }
-                    textSize = 13f
-                    setTextColor(muted)
-                    setPadding(0, dp(8), 0, 0)
-                }
-
-                item.addView(amountView)
-                item.addView(details)
-
-                list.addView(
-                    item,
-                    LinearLayout.LayoutParams(-1, -2).apply {
-                        bottomMargin = dp(10)
-                    }
-                )
-
-            } while (cursor.moveToNext())
+            received = cursor.getDouble(0)
+            sent = cursor.getDouble(1)
+            count = cursor.getInt(2)
         }
 
         cursor.close()
 
-        if (found == 0) {
-            val empty = TextView(this).apply {
-                text = "No matching transactions found."
-                textSize = 15f
-                setTextColor(muted)
-                gravity = Gravity.CENTER
-                setPadding(0, dp(40), 0, dp(40))
+        return Triple(received, sent, count)
+    }
+
+    private fun addCard(
+        title: String,
+        value: String,
+        color: Int
+    ) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(17), dp(16), dp(17), dp(16))
+            background = rounded(card)
+        }
+
+        box.addView(TextView(this).apply {
+            text = title
+            textSize = 12f
+            setTextColor(muted)
+            setTypeface(null, Typeface.BOLD)
+        })
+
+        box.addView(TextView(this).apply {
+            text = value
+            textSize = 26f
+            setTextColor(color)
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, dp(8), 0, 0)
+        })
+
+        root.addView(box)
+    }
+
+    private fun addMenu(
+        title: String,
+        subtitle: String,
+        action: () -> Unit
+    ) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(15), dp(16), dp(15))
+            background = rounded(card)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { action() }
+        }
+
+        box.addView(TextView(this).apply {
+            text = title
+            textSize = 16f
+            setTextColor(white)
+            setTypeface(null, Typeface.BOLD)
+        })
+
+        box.addView(TextView(this).apply {
+            text = subtitle
+            textSize = 12f
+            setTextColor(muted)
+            setPadding(0, dp(5), 0, 0)
+        })
+
+        root.addView(
+            box,
+            LinearLayout.LayoutParams(-1, -2).apply {
+                bottomMargin = dp(10)
             }
-            list.addView(empty)
+        )
+    }
+
+    private fun addText(
+        value: String,
+        size: Float,
+        color: Int,
+        bold: Boolean = false
+    ) {
+        root.addView(TextView(this).apply {
+            text = value
+            textSize = size
+            setTextColor(color)
+
+            if (bold) {
+                setTypeface(null, Typeface.BOLD)
+            }
+        })
+    }
+
+    private fun space(size: Int) {
+        root.addView(
+            android.view.View(this),
+            LinearLayout.LayoutParams(1, dp(size))
+        )
+    }
+
+    private fun rounded(color: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(18).toFloat()
         }
     }
 
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
+    private fun open(activity: Class<*>) {
+        startActivity(Intent(this, activity))
+    }
+
+    private fun money(value: Double): String {
+        return String.format(
+            java.util.Locale.US,
+            "%,.2f",
+            value
+        )
+    }
+
+    private fun dp(value: Int): Int {
+        return (
+            value * resources.displayMetrics.density
+        ).toInt()
+    }
+
+    override fun onResume() {
+        super.onResume()
+
+        if (::root.isInitialized) {
+            showDashboard()
+        }
+    }
 }
