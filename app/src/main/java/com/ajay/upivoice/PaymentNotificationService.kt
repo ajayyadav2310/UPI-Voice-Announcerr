@@ -3,42 +3,45 @@ package com.ajay.upivoice
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.speech.tts.TextToSpeech
-import android.os.Bundle
+import android.app.Notification
 import android.content.Context
+import android.os.Bundle
 import java.util.Locale
 import java.security.MessageDigest
 
 class PaymentNotificationService : NotificationListenerService() {
 
     private var tts: TextToSpeech? = null
-    private var ready = false
+    private var ttsReady = false
+    private var ttsFailed = false
 
     private val prefs by lazy {
         getSharedPreferences("upi_settings", Context.MODE_PRIVATE)
     }
 
     private val recent = mutableMapOf<String, Long>()
-    private val pending = mutableListOf<String>()
+    private val pendingSpeech = mutableListOf<String>()
 
     override fun onCreate() {
         super.onCreate()
 
         tts = TextToSpeech(this) { status ->
-            ready = status == TextToSpeech.SUCCESS
+            ttsReady = status == TextToSpeech.SUCCESS
+            ttsFailed = !ttsReady
 
-            if (ready) {
+            if (ttsReady) {
                 configureVoice()
 
-                synchronized(pending) {
-                    pending.forEach { speak(it) }
-                    pending.clear()
+                synchronized(pendingSpeech) {
+                    pendingSpeech.forEach { speak(it) }
+                    pendingSpeech.clear()
                 }
             }
         }
     }
 
     private fun configureVoice() {
-        val language = prefs.getString("language", "both") ?: "both"
+        val language = prefs.getString("language", "both")
 
         val locale = when (language) {
             "hi" -> Locale("hi", "IN")
@@ -57,28 +60,53 @@ class PaymentNotificationService : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
 
-        val extras: Bundle = sbn.notification.extras
+        if (sbn.packageName == packageName) return
 
-        val title = extras.getCharSequence("android.title")
-            ?.toString().orEmpty()
+        val notification = sbn.notification
+        val extras: Bundle = notification.extras
 
-        val text = extras.getCharSequence("android.text")
-            ?.toString().orEmpty()
+        val parts = mutableListOf<String>()
 
-        val bigText = extras.getCharSequence("android.bigText")
-            ?.toString().orEmpty()
+        fun add(value: CharSequence?) {
+            if (!value.isNullOrBlank()) {
+                parts.add(value.toString())
+            }
+        }
 
-        val message = "$title $text $bigText"
-        val lower = message.lowercase(Locale.ROOT)
+        add(extras.getCharSequence(Notification.EXTRA_TITLE))
+        add(extras.getCharSequence(Notification.EXTRA_TEXT))
+        add(extras.getCharSequence(Notification.EXTRA_BIG_TEXT))
+        add(extras.getCharSequence(Notification.EXTRA_SUB_TEXT))
+        add(notification.tickerText)
 
-        val receivedWords = listOf(
-            "received", "credited", "got", "added", "credit",
-            "प्राप्त", "मिला", "जमा", "आए"
+        val lines = extras.getCharSequenceArray(
+            Notification.EXTRA_TEXT_LINES
         )
 
+        lines?.forEach { add(it) }
+
+        val message = parts.joinToString(" ")
+        if (message.isBlank()) return
+
+        val lower = message.lowercase(Locale.ROOT)
+
         val sentWords = listOf(
-            "sent", "paid", "debited", "transferred",
-            "भेजा", "भुगतान किया", "डेबिट"
+            "sent", "you sent", "paid", "you paid",
+            "debited", "debit alert", "money sent",
+            "payment successful", "transferred to",
+            "payment to", "भेजा", "भुगतान किया",
+            "डेबिट", "ट्रांसफर किया"
+        )
+
+        val receivedWords = listOf(
+            "received", "payment received",
+            "you've got", "you have got",
+            "credited", "credit alert",
+            "money received", "received from",
+            "credited to", "has been credited",
+            "added to your account",
+            "प्राप्त", "मिला", "जमा हुआ",
+            "पैसे आए", "राशि प्राप्त"
         )
 
         val direction = when {
@@ -87,35 +115,25 @@ class PaymentNotificationService : NotificationListenerService() {
             else -> return
         }
 
-        if (direction == "RECEIVED" &&
-            !prefs.getBoolean("received_enabled", true)
-        ) return
-
-        if (direction == "SENT" &&
-            !prefs.getBoolean("sent_enabled", true)
-        ) return
-
-        if (!prefs.getBoolean("voice_enabled", true)) return
-
-        if (prefs.getBoolean("silent_mode", false)) return
-
-        val regex = Regex(
+        val amountRegex = Regex(
             """(?:₹|rs\.?|inr)\s*([0-9,]+(?:\.[0-9]{1,2})?)|([0-9,]+(?:\.[0-9]{1,2})?)\s*(?:rs\.?|inr|rupees|रुपये)""",
             RegexOption.IGNORE_CASE
         )
 
-        val match = regex.find(message) ?: return
+        val match = amountRegex.find(message) ?: return
 
-        val amountString = match.groupValues
+        val amountText = match.groupValues
             .drop(1)
             .firstOrNull { it.isNotBlank() }
             ?.replace(",", "") ?: return
 
-        val amount = amountString.toDoubleOrNull() ?: return
+        val amount = amountText.toDoubleOrNull() ?: return
         if (amount <= 0) return
 
         val now = System.currentTimeMillis()
-        val rawKey = "${sbn.packageName}|${sbn.key}|${sbn.postTime}|$amount|$direction"
+
+        val rawKey =
+            "${sbn.packageName}|${sbn.key}|${amount}|${direction}"
 
         val key = MessageDigest.getInstance("SHA-256")
             .digest(rawKey.toByteArray())
@@ -125,7 +143,9 @@ class PaymentNotificationService : NotificationListenerService() {
             if (now - (recent[key] ?: 0L) < 10000L) return
 
             recent[key] = now
-            recent.entries.removeAll { now - it.value > 60000L }
+            recent.entries.removeAll {
+                now - it.value > 60000L
+            }
         }
 
         val appName = try {
@@ -136,41 +156,72 @@ class PaymentNotificationService : NotificationListenerService() {
             "UPI"
         }
 
-        val saved = TransactionDb(this).saveTransaction(
-            dedupeKey = key,
-            amount = amount,
-            direction = direction,
-            counterparty = "",
-            appName = appName,
-            packageName = sbn.packageName,
-            title = title,
-            message = message
-        )
+        val counterparty = Regex(
+            """\bfrom\s+([A-Za-z][A-Za-z .'-]{1,35})""",
+            RegexOption.IGNORE_CASE
+        ).find(message)?.groupValues?.get(1)?.trim().orEmpty()
+
+        // Save transaction even if voice is disabled.
+        val saved = try {
+            TransactionDb(this).saveTransaction(
+                dedupeKey = key,
+                amount = amount,
+                direction = direction,
+                counterparty = counterparty,
+                appName = appName,
+                packageName = sbn.packageName,
+                title = extras.getCharSequence(
+                    Notification.EXTRA_TITLE
+                )?.toString().orEmpty(),
+                message = message
+            )
+        } catch (e: Exception) {
+            false
+        }
 
         if (!saved) return
 
+        // Voice preferences are checked only after saving.
+        if (!prefs.getBoolean("voice_enabled", true)) return
+
+        if (direction == "RECEIVED" &&
+            !prefs.getBoolean("received_enabled", true)
+        ) return
+
+        if (direction == "SENT" &&
+            !prefs.getBoolean("sent_enabled", true)
+        ) return
+
+        if (prefs.getBoolean("silent_mode", false)) return
+
         val language = prefs.getString("language", "both")
 
-        val announcement = when (language) {
-            "hi" -> if (direction == "RECEIVED")
-                "$amountString रुपये प्राप्त हुए"
-            else "$amountString रुपये भेजे गए"
+        val speech = when (language) {
+            "hi" -> if (direction == "RECEIVED") {
+                "$amountText रुपये $appName पर प्राप्त हुए"
+            } else {
+                "$amountText रुपये $appName से भेजे गए"
+            }
 
-            "en" -> if (direction == "RECEIVED")
-                "Rupees $amountString received on $appName"
-            else "Rupees $amountString sent using $appName"
+            "en" -> if (direction == "RECEIVED") {
+                "Rupees $amountText received on $appName"
+            } else {
+                "Rupees $amountText sent using $appName"
+            }
 
-            else -> if (direction == "RECEIVED")
-                "$amountString रुपये $appName पर प्राप्त हुए"
-            else "$amountString रुपये $appName से भेजे गए"
+            else -> if (direction == "RECEIVED") {
+                "$amountText रुपये $appName पर प्राप्त हुए"
+            } else {
+                "$amountText रुपये $appName से भेजे गए"
+            }
         }
 
-        synchronized(pending) {
-            if (ready) {
+        synchronized(pendingSpeech) {
+            if (ttsReady) {
                 configureVoice()
-                speak(announcement)
-            } else {
-                pending.add(announcement)
+                speak(speech)
+            } else if (!ttsFailed && pendingSpeech.size < 20) {
+                pendingSpeech.add(speech)
             }
         }
     }
